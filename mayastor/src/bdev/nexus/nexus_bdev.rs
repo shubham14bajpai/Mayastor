@@ -323,6 +323,8 @@ pub struct Nexus {
     pub nexus_target: Option<NexusTarget>,
     /// the maximum number of times to attempt to send an IO
     pub(crate) max_io_attempts: i32,
+    /// read-only
+    pub(crate) read_only: bool,
 }
 
 unsafe impl core::marker::Sync for Nexus {}
@@ -415,6 +417,7 @@ impl Nexus {
             size,
             nexus_target: None,
             max_io_attempts: cfg.err_store_opts.max_io_attempts,
+            read_only: false,
         });
 
         n.bdev.set_uuid(match uuid {
