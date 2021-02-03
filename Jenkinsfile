@@ -90,9 +90,9 @@ pipeline {
         }
       }
       steps {
-        sh 'nix-shell --run "cargo fmt --all -- --check"'
-        sh 'nix-shell --run "cargo clippy --all-targets -- -D warnings"'
-        sh 'nix-shell --run "./scripts/js-check.sh"'
+        sh 'echo nix-shell --run "cargo fmt --all -- --check"'
+        sh 'echo nix-shell --run "cargo clippy --all-targets -- -D warnings"'
+        sh 'echo nix-shell --run "./scripts/js-check.sh"'
       }
     }
     stage('test') {
@@ -110,7 +110,7 @@ pipeline {
           agent { label 'nixos-mayastor' }
           steps {
             sh 'printenv'
-            sh 'nix-shell --run "./scripts/cargo-test.sh"'
+            sh 'echo nix-shell --run "./scripts/cargo-test.sh"'
           }
           post {
             always {
@@ -123,7 +123,7 @@ pipeline {
           agent { label 'nixos-mayastor' }
           steps {
             sh 'printenv'
-            sh 'nix-shell --run "./scripts/grpc-test.sh"'
+            sh 'echo nix-shell --run "./scripts/grpc-test.sh"'
           }
           post {
             always {
@@ -135,7 +135,7 @@ pipeline {
           agent { label 'nixos-mayastor' }
           steps {
             sh 'printenv'
-            sh 'nix-shell --run "./scripts/moac-test.sh"'
+            sh 'echo nix-shell --run "./scripts/moac-test.sh"'
           }
           post {
             always {
@@ -155,7 +155,7 @@ pipeline {
                 // Build images (REGISTRY is set in jenkin's global configuration).
                 // Note: We might want to build and test dev images that have more
                 // assertions instead but that complicates e2e tests a bit.
-                sh "./scripts/release.sh --alias-tag ci --registry \"${env.REGISTRY}\""
+                sh "echo ./scripts/release.sh --alias-tag ci --registry \"${env.REGISTRY}\""
                 // Always remove all docker images because they are usually used just once
                 // and underlaying pkgs are already cached by nix so they can be easily
                 // recreated.
@@ -184,7 +184,7 @@ pipeline {
               }
             }
             stage('run e2e') {
-              agent { label 'nixos-mayastor' }
+              agent { label 'nixos' }
               environment {
                 GIT_COMMIT_SHORT = sh(
                   // using printf to get rid of trailing newline
@@ -196,6 +196,7 @@ pipeline {
               steps {
                 // FIXME(arne-rusek): move hcloud's config to top-level dir in TF scripts
                 sh """
+                  exit 1
                   mkdir -p "${e2e_environment}/modules/k8s/secrets"
                 """
                 copyArtifacts(
@@ -207,6 +208,38 @@ pipeline {
                 )
                 sh 'kubectl get nodes -o wide'
                 sh "nix-shell --run './scripts/e2e-test.sh --device /dev/sdb --tag \"${env.GIT_COMMIT_SHORT}\" --registry \"${env.REGISTRY}\"'"
+              }
+              post {
+                failure {
+                  script {
+                    withCredentials([string(credentialsId: 'HCLOUD_TOKEN', variable: 'HCLOUD_TOKEN')]) {
+                      e2e_nodes=sh(
+                        script: """
+                          nix-shell -p hcloud -p gawk --run 'hcloud server list' | grep -e '-${k8s_job.getNumber()} ' | awk '{ print \$2" "\$4 }'
+                        """,
+                        returnStdout: true
+                      ).trim()
+                    }
+                    // Job name for multi-branch is Mayastor/<branch> however
+                    // in URL jenkins requires /job/ in between for url to work
+                    urlized_job_name=JOB_NAME.replaceAll("/", "/job/")
+                    self_url="${JENKINS_URL}job/${urlized_job_name}/${BUILD_NUMBER}"
+                    self_name="${JOB_NAME}#${BUILD_NUMBER}"
+                    build_cluster_run_url="${JENKINS_URL}job/${k8s_job.getProjectName()}/${k8s_job.getNumber()}"
+                    build_cluster_destroy_url="${JENKINS_URL}job/${e2e_destroy_cluster_job}/buildWithParameters?BUILD=${k8s_job.getProjectName()}%23${k8s_job.getNumber()}"
+                    kubeconfig_url="${JENKINS_URL}job/${k8s_job.getProjectName()}/${k8s_job.getNumber()}/artifact/hcloud-kubeadm/modules/k8s/secrets/admin.conf"
+                    slackSend(
+                      channel: '#arusek',
+                      color: 'danger',
+                      message: "E2E k8s cluster <$build_cluster_run_url|#${k8s_job.getNumber()}> left running due to failure of " +
+                        "<$self_url|$self_name>. Investigate using <$kubeconfig_url|kubeconfig>, or ssh as root to:\n" +
+                        "```$e2e_nodes```\n" +
+                        "And then <$build_cluster_destroy_url|destroy> the cluster\n" +
+                        "Note: you need to click `proceed` and will get an empty page when using destroy link. " +
+                        "(<https://mayadata.atlassian.net/wiki/spaces/MS/pages/247332965/Test+infrastructure#On-Demand-E2E-K8S-Clusters|doc>)"
+                    )
+                  }
+                }
               }
             }
             stage('destroy e2e cluster') {
