@@ -213,6 +213,7 @@ done
 
 if [ "$generate_logs" -ne 0 ]; then
     if [ -n "$logsdir" ]; then
+        mkdir -p "$logsdir"
         if ! "$SCRIPTDIR"/e2e-cluster-dump.sh --destdir "$logsdir" ; then
             # ignore failures in the dump script
             :
