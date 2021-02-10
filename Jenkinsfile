@@ -9,6 +9,7 @@ def e2e_destroy_cluster_job='k8s-destroy-cluster' // Jenkins job to destroy clus
 def e2e_environment="hcloud-kubeadm"
 // Global variable to pass current k8s job between stages
 def k8s_job=""
+def image_tag='v0.7.0'
 
 // Searches previous builds to find first non aborted one
 def getLastNonAbortedBuild(build) {
@@ -55,10 +56,32 @@ if (currentBuild.getBuildCauses('jenkins.branch.BranchIndexingCause') &&
 // Only schedule regular builds on develop branch, so we don't need to guard against it
 String cron_schedule = BRANCH_NAME == "develop" ? "0 2 * * *" : ""
 
+// Determine which stages to run
+if (param.e2e_continuous == true) {
+  run_linter = false
+  rust_test = false
+  grpc_test = false
+  moac_test = false
+  e2e_test = true
+  e2e_image_build = false
+  allow_push_images = false
+} else {
+  run_linter = true
+  rust_test = true
+  grpc_test = true
+  moac_test = true
+  e2e_test = true
+  e2e_image_build = true
+  allow_push_images = true
+}
+
 pipeline {
   agent none
   options {
     timeout(time: 2, unit: 'HOURS')
+  }
+  parameters {
+    booleanParam(defaultValue: false, name: 'e2e_continuous')
   }
   triggers {
     cron(cron_schedule)
@@ -86,6 +109,7 @@ pipeline {
           anyOf {
             branch 'master'
             branch 'release/*'
+            expression { run_linter == false }
           }
         }
       }
@@ -107,6 +131,9 @@ pipeline {
       }
       parallel {
         stage('rust unit tests') {
+          when{
+            expression { rust_test == true }
+          }
           agent { label 'nixos-mayastor' }
           steps {
             sh 'printenv'
@@ -120,6 +147,9 @@ pipeline {
           }
         }
         stage('grpc tests') {
+          when{
+            expression { grpc_test == true }
+          }
           agent { label 'nixos-mayastor' }
           steps {
             sh 'printenv'
@@ -132,6 +162,9 @@ pipeline {
           }
         }
         stage('moac unit tests') {
+          when{
+            expression { moac_test == true }
+          }
           agent { label 'nixos-mayastor' }
           steps {
             sh 'printenv'
@@ -144,8 +177,14 @@ pipeline {
           }
         }
         stage('e2e tests') {
+          when{
+            expression { e2e_test == true }
+          }
           stages {
             stage('e2e docker images') {
+              when{
+                expression { e2e_image_build == true }
+              }
               agent { label 'nixos-mayastor' }
               steps {
                 // e2e tests are the most demanding step for space on the disk so we
@@ -186,27 +225,36 @@ pipeline {
             stage('run e2e') {
               agent { label 'nixos-mayastor' }
               environment {
-                GIT_COMMIT_SHORT = sh(
-                  // using printf to get rid of trailing newline
-                  script: "printf \$(git rev-parse --short ${GIT_COMMIT})",
-                  returnStdout: true
-                )
                 KUBECONFIG = "${env.WORKSPACE}/${e2e_environment}/modules/k8s/secrets/admin.conf"
               }
               steps {
-                // FIXME(arne-rusek): move hcloud's config to top-level dir in TF scripts
-                sh """
-                  mkdir -p "${e2e_environment}/modules/k8s/secrets"
-                """
-                copyArtifacts(
-                    projectName: "${k8s_job.getProjectName()}",
-                    selector: specific("${k8s_job.getNumber()}"),
-                    filter: "${e2e_environment}/modules/k8s/secrets/admin.conf",
-                    target: "",
-                    fingerprintArtifacts: true
-                )
-                sh 'kubectl get nodes -o wide'
-                sh "nix-shell --run './scripts/e2e-test.sh --device /dev/sdb --tag \"${env.GIT_COMMIT_SHORT}\" --registry \"${env.REGISTRY}\"'"
+                script (
+                  // FIXME(arne-rusek): move hcloud's config to top-level dir in TF scripts
+
+                  sh """
+                    mkdir -p "${e2e_environment}/modules/k8s/secrets"
+                  """
+                  copyArtifacts(
+                      projectName: "${k8s_job.getProjectName()}",
+                      selector: specific("${k8s_job.getNumber()}"),
+                      filter: "${e2e_environment}/modules/k8s/secrets/admin.conf",
+                      target: "",
+                      fingerprintArtifacts: true
+                  )
+                  sh 'kubectl get nodes -o wide'
+
+                  def tag = ""
+                  if (e2e_image_build == false) {
+                    tag = image_tag
+                  } else {
+                    tag = sh(
+                      // using printf to get rid of trailing newline
+                      script: "printf \$(git rev-parse --short ${GIT_COMMIT})",
+                      returnStdout: true
+                    )
+                  }
+                  sh "nix-shell --run './scripts/e2e-test.sh --device /dev/sdb --tag \"${tag}\" --registry \"${env.REGISTRY}\"'"
+                }
               }
             }
             stage('destroy e2e cluster') {
@@ -241,10 +289,13 @@ pipeline {
       agent { label 'nixos-mayastor' }
       when {
         beforeAgent true
-        anyOf {
-          branch 'master'
-          branch 'release/*'
-          branch 'develop'
+        allOf {
+          expression { allow_push_images == true }
+          anyOf {
+            branch 'master'
+            branch 'release/*'
+            branch 'develop'
+          }
         }
       }
       steps {
