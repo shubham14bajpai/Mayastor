@@ -19,7 +19,7 @@ export PATH=$PATH:${HOME}/.cargo/bin
 # test dependencies
 cargo build --bins
 ( cd mayastor && cargo test -- --test-threads=1 )
-for test in composer agents rest; do
+for test in composer agents rest ctrlp-tests; do
     cargo test -p ${test} -- --test-threads=1
 done
 ( cd nvmeadm && cargo test )
